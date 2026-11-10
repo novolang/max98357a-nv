@@ -24,6 +24,20 @@ device program builds for the nRF52840 DK and the nRF54LM20 DK against a
 stand-in handle that refuses to be configured. A tone from a part on a board
 has not been heard.
 
+## Install
+
+```sh
+novo pkg add max98357a-nv
+```
+
+The device program is `examples/tone.nv`.  Make it the `main` of a package that
+depends on this one and build it for a board:
+
+```sh
+novo build --target=nrf52840-dk src/main.nv
+novo build --target=nrf54lm20-dk src/main.nv
+```
+
 ## The device program
 
 `examples/tone.nv` plays 440 Hz for half a second, a ramp to zero and half a

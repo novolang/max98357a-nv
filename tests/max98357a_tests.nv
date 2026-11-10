@@ -149,7 +149,8 @@ fn test_bclk_is_32_48_or_64_times_lrclk_for_16_24_or_32_bit_words() [io, hw]
     test.assert(not max98357a.bclk_ratio_ok(12))
     test.assert(not max98357a.bclk_ratio_ok(20))
     // The data sheet's test condition: BCLK 3.072 MHz at LRCLK 48 kHz.
-    test.assert_eq(max98357a.bclk_hz(AmpConfig { part: AmpPart.Max98357A, sample_rate: 48000, bit_depth: 32 }), 3072000)
+    test.assert_eq(max98357a.bclk_hz(AmpConfig { part: AmpPart.Max98357A, sample_rate: 48000, bit_depth: 32 }),
+        3072000)
     test.assert_eq(max98357a.bclk_hz(max98357a.config(48000)), 1536000)
 
 @test
@@ -444,8 +445,8 @@ fn test_a_tone_is_sent_buffer_by_buffer_with_the_phase_carried_over() [io, hw]
     // 16 ms at 16 kHz is 256 frames: two buffers of 256 samples.
     test.assert_eq(max98357a.play_tone(FakeI2s { b: b }, c, 440, 16, 32767), 512)
     test.assert_eq(at(b.st, 16), 2)
-    // 440 Hz at 16 kHz steps 461373 a frame; 128 frames end at phase 8724096,
-    // where the sine is -4103 of full scale.
+    // 440 Hz at 16 kHz steps 461373 a frame; 128 frames end with the phase
+    // accumulator at 8724096, where the sine is -4103 of full scale.
     test.assert_eq(at(b.tx, 1000), 0)
     test.assert_eq(at(b.tx, 2000), -4103)
     test.assert_eq(at(b.tx, 2001), -4103)

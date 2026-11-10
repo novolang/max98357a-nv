@@ -54,13 +54,13 @@
 use embedded_hal.{ I2s, I2sConfig, I2sRole, I2sFormat, GpioOut }
 
 // The sample rates LRCLK accepts, in hertz.
-let RATE_8K = 8000
-let RATE_16K = 16000
-let RATE_32K = 32000
+let RATE_8K   = 8000
+let RATE_16K  = 16000
+let RATE_32K  = 32000
 let RATE_44K1 = 44100
-let RATE_48K = 48000
+let RATE_48K  = 48000
 let RATE_88K2 = 88200
-let RATE_96K = 96000
+let RATE_96K  = 96000
 
 // The turn-on time, at most, in microseconds (data sheet: 7.5 ms).
 pub const TURN_ON_US = 7500
@@ -85,8 +85,7 @@ pub const SINE_QUARTER = [
     16846, 17530, 18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594, 23170,
     23731, 24279, 24811, 25329, 25832, 26319, 26790, 27245, 27683, 28105, 28510,
     28898, 29268, 29621, 29956, 30273, 30571, 30852, 31113, 31356, 31580, 31785,
-    31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757, 32767, 32767
-]
+    31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757, 32767, 32767]
 
 // The phase of a tone is a number of 2^24 steps to the cycle.
 pub const CYCLE = 16777216
@@ -210,9 +209,9 @@ pub fn sd_off<G: GpioOut>(gpio: G, w: AmpWiring) [hw]
 // The gain in decibels.
 pub fn gain_db(g: AmpGain) -> Int
     match g
-        Gain3Db => 3
-        Gain6Db => 6
-        Gain9Db => 9
+        Gain3Db  => 3
+        Gain6Db  => 6
+        Gain9Db  => 9
         Gain12Db => 12
         Gain15Db => 15
 
@@ -222,12 +221,12 @@ pub fn gain_db(g: AmpGain) -> Int
 // 15 dB (low), 3 dB (high) and 9 dB.
 pub fn gain_drive(g: AmpGain, via_100k: Bool) -> Int
     match g
-        Gain9Db => 2
+        Gain9Db  => 2
         Gain12Db =>
             if via_100k
                 return -1
             0
-        Gain6Db =>
+        Gain6Db  =>
             if via_100k
                 return -1
             1
@@ -235,7 +234,7 @@ pub fn gain_drive(g: AmpGain, via_100k: Bool) -> Int
             if via_100k
                 return 0
             -1
-        Gain3Db =>
+        Gain3Db  =>
             if via_100k
                 return 1
             -1
