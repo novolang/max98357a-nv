@@ -1,0 +1,488 @@
+// max98357a_tests — the package over doubles of the board's I2S handle and
+// GPIO.  The two doubles share one event log, so a test can check the order
+// of the pin sequences against the clocks: the data sheet (19-6779 Rev 7)
+// asks that the part is never fed half a frame and never loses LRCLK while
+// BCLK is present.
+//
+// Events: 10 configure, 11 enable, 12 disable, 13 transmit; a pin set is
+// 100 + 10 * pin + level; a pin mode is 200 + 10 * pin + direction.
+//
+// The double's state `st`: 0 events so far, 1 sample rate, 2 bit depth,
+// 3 channels, 4 role (0 master, 1 slave), 5 format (0 Philips, 1
+// left-justified), 8 refuse configure, 9 xruns, 13 refuse enable, 14 refuse
+// every transmit, 15 the transmit call that is refused (0 for none), 16
+// transmit calls, 17 samples in the last transmit.  `tx` holds the samples of
+// transmit call n at n * 1000 + i.
+
+use std.test
+use embedded_hal.{ I2s, I2sConfig, I2sRole, I2sFormat, GpioOut }
+use max98357a
+use max98357a.{ AmpPart, AmpGain, AmpChannel, AmpConfig, AmpWiring }
+
+struct Bus
+    st: HashMap<Int, Int>
+    ev: HashMap<Int, Int>
+    tx: HashMap<Int, Int>
+
+fn at(m: HashMap<Int, Int>, k: Int) -> Int
+    m.get(k) ?? 0
+
+fn push(b: Bus, v: Int)
+    let n = at(b.st, 0)
+    b.ev.insert(n, v)
+    b.st.insert(0, n + 1)
+
+fn bus() -> Bus
+    Bus { st: HashMap.new(), ev: HashMap.new(), tx: HashMap.new() }
+
+struct FakeI2s
+    b: Bus
+
+impl I2s for FakeI2s
+    fn configure(self, c: I2sConfig) -> Bool [hw]
+        push(self.b, 10)
+        if at(self.b.st, 8) == 1
+            return false
+        self.b.st.insert(1, c.sample_rate)
+        self.b.st.insert(2, c.bit_depth)
+        self.b.st.insert(3, c.channels)
+        if c.role == I2sRole.I2sMaster
+            self.b.st.insert(4, 0)
+        else
+            self.b.st.insert(4, 1)
+        if c.format == I2sFormat.I2sPhilips
+            self.b.st.insert(5, 0)
+        else
+            self.b.st.insert(5, 1)
+        true
+
+    fn sample_rate(self) -> Int [hw]
+        at(self.b.st, 1)
+
+    fn enable(self) -> Bool [hw]
+        push(self.b, 11)
+        at(self.b.st, 13) != 1
+
+    fn disable(self) [hw]
+        push(self.b, 12)
+
+    fn transmit(self, var buf: Vec[i32; 256]) -> Int [hw]
+        push(self.b, 13)
+        let n = at(self.b.st, 16) + 1
+        self.b.st.insert(16, n)
+        self.b.st.insert(17, buf.len())
+        for i in 0..buf.len()
+            self.b.tx.insert(n * 1000 + i, buf[i] as Int)
+        if at(self.b.st, 14) == 1 or at(self.b.st, 15) == n
+            return -1
+        buf.len()
+
+    fn receive(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        -1
+
+    fn xruns(self) -> Int [hw]
+        at(self.b.st, 9)
+
+struct FakeGpio
+    b: Bus
+    levels: HashMap<Int, Int>
+
+impl GpioOut for FakeGpio
+    fn mode(self, pin: Int, dir: Int) [hw]
+        push(self.b, 200 + pin * 10 + dir)
+
+    fn set(self, pin: Int, val: Int) [hw]
+        push(self.b, 100 + pin * 10 + val)
+        self.levels.insert(pin, val)
+
+    fn get(self, pin: Int) -> Int [hw]
+        at(self.levels, pin)
+
+// SD_MODE on pin 5, GAIN_SLOT on pin 6 driven direct.
+fn wiring() -> AmpWiring
+    AmpWiring { sd_mode: 5, gain: Some(6), gain_via_100k: false }
+
+fn wiring_100k() -> AmpWiring
+    AmpWiring { sd_mode: 5, gain: Some(6), gain_via_100k: true }
+
+fn wiring_no_gain() -> AmpWiring
+    AmpWiring { sd_mode: 5, gain: None, gain_via_100k: false }
+
+@tier(app)
+fn pair(b: Bus) -> FakeGpio
+    FakeGpio { b: b, levels: HashMap.new() }
+
+// Asserts the events are exactly `want`, then empties the log.
+fn ev_is(b: Bus, want: [Int])
+    test.assert_eq(at(b.st, 0), want.len())
+    for i in 0..want.len()
+        test.assert_eq(at(b.ev, i), want[i])
+    b.st.insert(0, 0)
+
+// ── The stream ───────────────────────────────────────────────────────
+
+@test
+fn test_the_part_takes_seven_word_clocks() [io, hw]
+    test.assert(max98357a.rate_ok(8000))
+    test.assert(max98357a.rate_ok(16000))
+    test.assert(max98357a.rate_ok(32000))
+    test.assert(max98357a.rate_ok(44100))
+    test.assert(max98357a.rate_ok(48000))
+    test.assert(max98357a.rate_ok(88200))
+    test.assert(max98357a.rate_ok(96000))
+
+@test
+fn test_the_clocks_the_data_sheet_names_as_not_supported_are_refused() [io, hw]
+    test.assert(not max98357a.rate_ok(11025))
+    test.assert(not max98357a.rate_ok(12000))
+    test.assert(not max98357a.rate_ok(22050))
+    test.assert(not max98357a.rate_ok(24000))
+    test.assert(not max98357a.rate_ok(44000))
+    test.assert(not max98357a.rate_ok(0))
+
+@test
+fn test_bclk_is_32_48_or_64_times_lrclk_for_16_24_or_32_bit_words() [io, hw]
+    test.assert(max98357a.bclk_ratio_ok(16))
+    test.assert(max98357a.bclk_ratio_ok(24))
+    test.assert(max98357a.bclk_ratio_ok(32))
+    test.assert(not max98357a.bclk_ratio_ok(8))
+    test.assert(not max98357a.bclk_ratio_ok(12))
+    test.assert(not max98357a.bclk_ratio_ok(20))
+    // The data sheet's test condition: BCLK 3.072 MHz at LRCLK 48 kHz.
+    test.assert_eq(max98357a.bclk_hz(AmpConfig { part: AmpPart.Max98357A, sample_rate: 48000, bit_depth: 32 }), 3072000)
+    test.assert_eq(max98357a.bclk_hz(max98357a.config(48000)), 1536000)
+
+@test
+fn test_the_default_stream_is_16_bits_on_the_max98357a() [io, hw]
+    let c = max98357a.config(16000)
+    test.assert(c.part == AmpPart.Max98357A)
+    test.assert_eq(c.sample_rate, 16000)
+    test.assert_eq(c.bit_depth, 16)
+    test.assert(max98357a.config_ok(c))
+    test.assert(not max98357a.config_ok(max98357a.config(11025)))
+    test.assert(not max98357a.config_ok(AmpConfig { part: AmpPart.Max98357A, sample_rate: 48000, bit_depth: 8 }))
+
+@test
+fn test_the_handle_is_configured_as_master_with_two_channels() [io, hw]
+    let a = max98357a.i2s_config_of(max98357a.config(48000))
+    test.assert_eq(a.sample_rate, 48000)
+    test.assert_eq(a.bit_depth, 16)
+    test.assert_eq(a.channels, 2)
+    test.assert(a.role == I2sRole.I2sMaster)
+    test.assert(a.format == I2sFormat.I2sPhilips)
+    let b = max98357a.i2s_config_of(AmpConfig { part: AmpPart.Max98357B, sample_rate: 96000, bit_depth: 32 })
+    test.assert(b.format == I2sFormat.I2sLeftJustified)
+    test.assert_eq(b.bit_depth, 32)
+
+// ── SD_MODE ──────────────────────────────────────────────────────────
+
+@test
+fn test_the_pull_up_resistors_follow_the_data_sheet_equations() [io, hw]
+    // RSMALL = 94.0 x VDDIO - 100 and RLARGE = 222.2 x VDDIO - 100 kohm; the
+    // data sheet's Table 6 rounds to the nearest value of a series: 210.2 and
+    // 634 kohm at 3.3 V, 69.8 and 300 kohm at 1.8 V.
+    test.assert_eq(max98357a.rsmall_tenth_kohm(3300), 2102)
+    test.assert_eq(max98357a.rlarge_tenth_kohm(3300), 6332)
+    test.assert_eq(max98357a.rsmall_tenth_kohm(1800), 692)
+    test.assert_eq(max98357a.rlarge_tenth_kohm(1800), 2999)
+    // Too low a logic level cannot be driven through a resistor.
+    test.assert_eq(max98357a.rsmall_tenth_kohm(1000), -1)
+    test.assert_eq(max98357a.rlarge_tenth_kohm(400), -1)
+    test.assert_eq(max98357a.rlarge_tenth_kohm(1000), 1222)
+
+@test
+fn test_the_voltage_on_sd_mode_selects_the_channel_by_the_trip_points() [io, hw]
+    test.assert(max98357a.channel_of_mv(3300) == AmpChannel.ChannelLeft)
+    test.assert(max98357a.channel_of_mv(1401) == AmpChannel.ChannelLeft)
+    test.assert(max98357a.channel_of_mv(1400) == AmpChannel.ChannelRight)
+    test.assert(max98357a.channel_of_mv(1000) == AmpChannel.ChannelRight)
+    test.assert(max98357a.channel_of_mv(771) == AmpChannel.ChannelRight)
+    test.assert(max98357a.channel_of_mv(770) == AmpChannel.ChannelMix)
+    test.assert(max98357a.channel_of_mv(500) == AmpChannel.ChannelMix)
+    test.assert(max98357a.channel_of_mv(161) == AmpChannel.ChannelMix)
+    test.assert(max98357a.channel_of_mv(160) == AmpChannel.ChannelShutdown)
+    test.assert(max98357a.channel_of_mv(0) == AmpChannel.ChannelShutdown)
+
+@test
+fn test_sd_mode_is_made_an_output_then_driven() [io, hw]
+    let b = bus()
+    let g = pair(b)
+    max98357a.sd_on(g, wiring())
+    ev_is(b, [251, 151])
+    max98357a.sd_off(g, wiring())
+    ev_is(b, [251, 150])
+    test.assert_eq(at(g.levels, 5), 0)
+
+// ── GAIN_SLOT ────────────────────────────────────────────────────────
+
+@test
+fn test_the_five_gains_are_3_6_9_12_and_15_decibels() [io, hw]
+    test.assert_eq(max98357a.gain_db(AmpGain.Gain3Db), 3)
+    test.assert_eq(max98357a.gain_db(AmpGain.Gain6Db), 6)
+    test.assert_eq(max98357a.gain_db(AmpGain.Gain9Db), 9)
+    test.assert_eq(max98357a.gain_db(AmpGain.Gain12Db), 12)
+    test.assert_eq(max98357a.gain_db(AmpGain.Gain15Db), 15)
+
+@test
+fn test_a_gain_pin_wired_direct_makes_12_6_and_9_decibels() [io, hw]
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain12Db, false), 0)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain6Db, false), 1)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain9Db, false), 2)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain15Db, false), -1)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain3Db, false), -1)
+
+@test
+fn test_a_gain_pin_behind_100_kohm_makes_15_3_and_9_decibels() [io, hw]
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain15Db, true), 0)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain3Db, true), 1)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain9Db, true), 2)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain12Db, true), -1)
+    test.assert_eq(max98357a.gain_drive(AmpGain.Gain6Db, true), -1)
+
+@test
+fn test_the_gain_pin_is_driven_low_high_or_released() [io, hw]
+    let b = bus()
+    let g = pair(b)
+    test.assert(max98357a.gain_set(g, wiring(), AmpGain.Gain12Db))
+    ev_is(b, [261, 160])
+    test.assert(max98357a.gain_set(g, wiring(), AmpGain.Gain6Db))
+    ev_is(b, [261, 161])
+    test.assert(max98357a.gain_set(g, wiring(), AmpGain.Gain9Db))
+    ev_is(b, [260])
+    test.assert(max98357a.gain_set(g, wiring_100k(), AmpGain.Gain15Db))
+    ev_is(b, [261, 160])
+    test.assert(max98357a.gain_set(g, wiring_100k(), AmpGain.Gain3Db))
+    ev_is(b, [261, 161])
+
+@test
+fn test_a_gain_the_wiring_cannot_make_drives_nothing() [io, hw]
+    let b = bus()
+    let g = pair(b)
+    test.assert(not max98357a.gain_set(g, wiring(), AmpGain.Gain15Db))
+    test.assert(not max98357a.gain_set(g, wiring(), AmpGain.Gain3Db))
+    test.assert(not max98357a.gain_set(g, wiring_100k(), AmpGain.Gain12Db))
+    test.assert(not max98357a.gain_set(g, wiring_no_gain(), AmpGain.Gain12Db))
+    test.assert_eq(at(b.st, 0), 0)
+
+// ── Starting and stopping ────────────────────────────────────────────
+
+@test
+fn test_start_keeps_the_part_in_shutdown_while_the_clocks_start() [io, hw]
+    let b = bus()
+    let s = FakeI2s { b: b }
+    let g = pair(b)
+    let r = max98357a.start(s, g, wiring(), max98357a.config(48000))
+    test.assert_eq(r, 7500)
+    // SD_MODE low, the handle configured and enabled, SD_MODE high last.
+    ev_is(b, [251, 150, 10, 11, 251, 151])
+    test.assert_eq(at(b.st, 1), 48000)
+    test.assert_eq(at(b.st, 2), 16)
+    test.assert_eq(at(b.st, 3), 2)
+    test.assert_eq(at(b.st, 4), 0)
+    test.assert_eq(at(b.st, 5), 0)
+
+@test
+fn test_a_max98357b_gets_left_justified_frames() [io, hw]
+    let b = bus()
+    let c = AmpConfig { part: AmpPart.Max98357B, sample_rate: 44100, bit_depth: 24 }
+    test.assert_eq(max98357a.start(FakeI2s { b: b }, pair(b), wiring(), c), 7500)
+    test.assert_eq(at(b.st, 5), 1)
+    test.assert_eq(at(b.st, 2), 24)
+
+@test
+fn test_start_refuses_a_stream_the_part_does_not_take_with_the_part_off() [io, hw]
+    let b = bus()
+    test.assert_eq(max98357a.start(FakeI2s { b: b }, pair(b), wiring(), max98357a.config(11025)), -1)
+    ev_is(b, [251, 150])
+    let c8 = AmpConfig { part: AmpPart.Max98357A, sample_rate: 48000, bit_depth: 8 }
+    test.assert_eq(max98357a.start(FakeI2s { b: b }, pair(b), wiring(), c8), -1)
+    ev_is(b, [251, 150])
+
+@test
+fn test_start_refuses_when_the_handle_refuses_and_never_raises_sd_mode() [io, hw]
+    let b = bus()
+    b.st.insert(8, 1)
+    test.assert_eq(max98357a.start(FakeI2s { b: b }, pair(b), wiring(), max98357a.config(48000)), -1)
+    ev_is(b, [251, 150, 10])
+    let b2 = bus()
+    b2.st.insert(13, 1)
+    test.assert_eq(max98357a.start(FakeI2s { b: b2 }, pair(b2), wiring(), max98357a.config(48000)), -1)
+    ev_is(b2, [251, 150, 10, 11])
+
+@test
+fn test_stop_lowers_sd_mode_before_the_clocks_stop() [io, hw]
+    let b = bus()
+    max98357a.stop(FakeI2s { b: b }, pair(b), wiring())
+    ev_is(b, [251, 150, 12])
+
+@test
+fn test_the_ramp_falls_in_a_straight_line_to_zero_on_both_channels() [io, hw]
+    var buf: Vec[i32; 256] = Vec.new()
+    max98357a.ramp_fill(var buf, 1000, 256)
+    test.assert_eq(buf.len(), 256)
+    test.assert_eq(buf[0] as Int, 992)
+    test.assert_eq(buf[1] as Int, 992)
+    test.assert_eq(buf[2] as Int, 984)
+    test.assert_eq(buf[252] as Int, 7)
+    test.assert_eq(buf[254] as Int, 0)
+    test.assert_eq(buf[255] as Int, 0)
+    max98357a.ramp_fill(var buf, -1000, 256)
+    test.assert_eq(buf[0] as Int, -992)
+    test.assert_eq(buf[254] as Int, 0)
+    max98357a.ramp_fill(var buf, 1000, 10)
+    test.assert_eq(buf.len(), 10)
+    test.assert_eq(buf[0] as Int, 800)
+    test.assert_eq(buf[2] as Int, 600)
+    test.assert_eq(buf[8] as Int, 0)
+    max98357a.ramp_fill(var buf, 1000, 1000)
+    test.assert_eq(buf.len(), 256)
+    max98357a.ramp_fill(var buf, 1000, 0)
+    test.assert_eq(buf.len(), 0)
+
+@test
+fn test_a_soft_stop_sends_the_ramp_then_shuts_the_part_down() [io, hw]
+    let b = bus()
+    test.assert(max98357a.stop_soft(FakeI2s { b: b }, pair(b), wiring(), 1000))
+    ev_is(b, [13, 251, 150, 12])
+    test.assert_eq(at(b.tx, 1000), 992)
+    test.assert_eq(at(b.tx, 1255), 0)
+
+@test
+fn test_a_soft_stop_whose_ramp_is_refused_still_stops_the_part() [io, hw]
+    let b = bus()
+    b.st.insert(14, 1)
+    test.assert(not max98357a.stop_soft(FakeI2s { b: b }, pair(b), wiring(), 1000))
+    ev_is(b, [13, 251, 150, 12])
+
+@test
+fn test_write_sends_the_buffer_and_answers_the_samples_or_minus_one() [io, hw]
+    let b = bus()
+    var buf: Vec[i32; 256] = Vec.new()
+    for i in 0..20
+        let _ = buf.push(i as i32)
+    test.assert_eq(max98357a.write(FakeI2s { b: b }, var buf), 20)
+    test.assert_eq(at(b.tx, 1019), 19)
+    b.st.insert(14, 1)
+    test.assert_eq(max98357a.write(FakeI2s { b: b }, var buf), -1)
+
+// ── The tone ─────────────────────────────────────────────────────────
+
+@test
+fn test_the_quarter_wave_has_66_points_from_zero_to_full_scale() [io, hw]
+    test.assert_eq(max98357a.SINE_QUARTER.len(), 66)
+    test.assert_eq(max98357a.SINE_QUARTER[0], 0)
+    test.assert_eq(max98357a.SINE_QUARTER[64], 32767)
+    test.assert_eq(max98357a.SINE_QUARTER[65], 32767)
+    // sin 30 degrees is one half: point 21.33 of 64; point 16 is 22.5 degrees.
+    test.assert_eq(max98357a.SINE_QUARTER[16], 12539)
+    test.assert_eq(max98357a.SINE_QUARTER[32], 23170)
+    test.assert_eq(max98357a.SINE_QUARTER[48], 30273)
+    for i in 0..64
+        test.assert(max98357a.SINE_QUARTER[i + 1] >= max98357a.SINE_QUARTER[i])
+
+@test
+fn test_the_sine_is_read_from_the_quarter_wave_in_all_four_quadrants() [io, hw]
+    test.assert_eq(max98357a.sine_q15(0), 0)
+    test.assert_eq(max98357a.sine_q15(1048576), 12539)
+    test.assert_eq(max98357a.sine_q15(4194304), 32767)
+    test.assert_eq(max98357a.sine_q15(5242880), 30273)
+    test.assert_eq(max98357a.sine_q15(8388608), 0)
+    test.assert_eq(max98357a.sine_q15(12320768), -32609)
+    test.assert_eq(max98357a.sine_q15(12582912), -32767)
+    // The phase wraps at the cycle.
+    test.assert_eq(max98357a.sine_q15(max98357a.CYCLE + 1048576), 12539)
+
+@test
+fn test_the_second_half_of_the_cycle_is_the_first_half_mirrored() [io, hw]
+    for k in 0..40
+        let p = k * 99991
+        test.assert_eq(max98357a.sine_q15(p + 8388608), 0 - max98357a.sine_q15(p))
+
+@test
+fn test_the_phase_step_is_the_cycle_over_the_samples_to_the_cycle() [io, hw]
+    test.assert_eq(max98357a.tone_step(440, 48000), 153791)
+    test.assert_eq(max98357a.tone_step(1000, 16000), 1048576)
+    test.assert_eq(max98357a.tone_step(440, 0), 0)
+
+@test
+fn test_a_sample_is_scaled_by_the_amplitude_and_moved_into_the_word() [io, hw]
+    test.assert_eq(max98357a.tone_sample(4194304, 32767, 16), 32766)
+    test.assert_eq(max98357a.tone_sample(4194304, 16384, 16), 16383)
+    test.assert_eq(max98357a.tone_sample(12582912, 16384, 16), -16383)
+    test.assert_eq(max98357a.tone_sample(4194304, 32767, 24), 8388096)
+    test.assert_eq(max98357a.tone_sample(4194304, 32767, 32), 2147352576)
+    test.assert_eq(max98357a.tone_sample(0, 32767, 16), 0)
+    test.assert_eq(max98357a.tone_sample(4194304, 0, 16), 0)
+
+@test
+fn test_a_buffer_of_the_tone_holds_128_frames_with_equal_channels() [io, hw]
+    var buf: Vec[i32; 256] = Vec.new()
+    // 1 kHz at 16 kHz is 1/16 of a cycle a frame: 22.5 degrees.
+    let after = max98357a.tone_fill(var buf, 0, 1048576, 32767, 16)
+    test.assert_eq(buf.len(), 256)
+    let want = [0, 12538, 23169, 30272, 32766, 30272, 23169, 12538, 0, -12538]
+    for k in 0..10
+        test.assert_eq(buf[k * 2] as Int, want[k])
+        test.assert_eq(buf[k * 2 + 1] as Int, want[k])
+    // 128 frames of 1/16 cycle are 8 cycles: the phase is back at 0.
+    test.assert_eq(after, 0)
+    let after2 = max98357a.tone_fill(var buf, 0, 153791, 16384, 16)
+    test.assert_eq(after2, 2908032)
+
+@test
+fn test_the_buffers_of_a_tone_are_counted_up() [io, hw]
+    test.assert_eq(max98357a.tone_buffers(0, 16000), 0)
+    test.assert_eq(max98357a.tone_buffers(-5, 16000), 0)
+    test.assert_eq(max98357a.tone_buffers(8, 16000), 1)
+    test.assert_eq(max98357a.tone_buffers(9, 16000), 2)
+    test.assert_eq(max98357a.tone_buffers(1000, 48000), 375)
+
+@test
+fn test_a_tone_is_sent_buffer_by_buffer_with_the_phase_carried_over() [io, hw]
+    let b = bus()
+    let c = max98357a.config(16000)
+    // 16 ms at 16 kHz is 256 frames: two buffers of 256 samples.
+    test.assert_eq(max98357a.play_tone(FakeI2s { b: b }, c, 440, 16, 32767), 512)
+    test.assert_eq(at(b.st, 16), 2)
+    // 440 Hz at 16 kHz steps 461373 a frame; 128 frames end at phase 8724096,
+    // where the sine is -4103 of full scale.
+    test.assert_eq(at(b.tx, 1000), 0)
+    test.assert_eq(at(b.tx, 2000), -4103)
+    test.assert_eq(at(b.tx, 2001), -4103)
+    test.assert_eq(at(b.tx, 1002), 5631)
+
+@test
+fn test_a_tone_stops_at_the_first_refused_buffer() [io, hw]
+    let b = bus()
+    b.st.insert(15, 2)
+    test.assert_eq(max98357a.play_tone(FakeI2s { b: b }, max98357a.config(16000), 440, 100, 32767), -1)
+    test.assert_eq(at(b.st, 16), 2)
+    let b2 = bus()
+    test.assert_eq(max98357a.play_tone(FakeI2s { b: b2 }, max98357a.config(16000), 440, 0, 32767), 0)
+    test.assert_eq(at(b2.st, 0), 0)
+
+// ── The amplifier on a board's handles ───────────────────────────────
+
+@test
+fn test_the_amplifier_over_the_handles_runs_a_whole_session() [io, hw]
+    let b = bus()
+    let a = max98357a.attach(FakeI2s { b: b }, pair(b), wiring(), max98357a.config(8000))
+    test.assert_eq(a.config().sample_rate, 8000)
+    test.assert_eq(a.wiring().sd_mode, 5)
+    test.assert(a.amp_set_gain(AmpGain.Gain12Db))
+    ev_is(b, [261, 160])
+    test.assert_eq(a.amp_start(), 7500)
+    ev_is(b, [251, 150, 10, 11, 251, 151])
+    // 16 ms at 8 kHz is 128 frames: one buffer.
+    test.assert_eq(a.amp_tone(440, 16, 20000), 256)
+    var buf: Vec[i32; 256] = Vec.new()
+    let _ = buf.push(7 as i32)
+    let _ = buf.push(7 as i32)
+    test.assert_eq(a.amp_write(var buf), 2)
+    b.st.insert(9, 3)
+    test.assert_eq(a.amp_lost(), 3)
+    b.st.insert(0, 0)
+    test.assert(a.amp_stop_soft(500))
+    ev_is(b, [13, 251, 150, 12])
+    a.amp_stop()
+    ev_is(b, [251, 150, 12])

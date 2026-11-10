@@ -1,0 +1,32 @@
+[package]
+name        = "max98357a-nv"
+version     = "0.1.0"
+description = "A driver for the MAX98357A and MAX98357B, I2S class D audio amplifiers with no registers, over a board's I2S handle and two GPIO pins: SD_MODE for turn-on and shutdown in the order the data sheet asks, the gain pin with its five gains, the stream the part accepts (seven word clocks, 16, 24 or 32-bit words, I2S or left-justified), a quarter-wave sine table for a tone, and a ramp to zero before shutdown."
+license     = "Apache-2.0"
+stability   = "experimental"
+category    = "embedded"
+layer       = "host"
+tags        = ["max98357a", "max98357b", "amplifier", "class-d", "speaker", "i2s", "audio", "tone", "nrf52840-dk", "nrf54lm20-dk"]
+repository  = "https://github.com/novolang/max98357a-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.24.0"
+
+# The package is checked at the embedded tier, the strictest one, so
+# every function in it is also valid at rt and system.
+[tier]
+tier = "embedded"
+
+[docs.pages]
+"README.md" = "Playing a tone through a MAX98357A from a device program"
+
+# The device program, examples/tone.nv, has no [[bin]] entry: an entry
+# makes the registry list the package as a program.  tests/device_build.sh
+# builds the program for two boards as the main of a scratch package that
+# depends on this one.
+
+[dependencies]
+# The I2s and GpioOut traits and the I2S settings the handle is configured
+# with.  A path, because I2s is in the 0.3.3 release and the registry lists
+# 0.3.2.  The package needs no other dependency: the part has no register, so
+# there is no devices-nv trait to implement.
+embedded-hal-nv = { path = "../embedded-hal-nv" }

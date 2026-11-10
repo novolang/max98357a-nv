@@ -1,0 +1,86 @@
+/* tone.nv: plays a 440 Hz tone for half a second through a MAX98357A,
+ * then half a second of silence, and again
+ *
+ * Build:  bash tests/device_build.sh   (the package's own script)
+ *         or make this file the main of a package that depends on
+ *         max98357a-nv and run
+ *             novo build --target=nrf52840-dk src/main.nv
+ * Run:    probe-rs run --chip nRF52840_xxAA main.elf
+ *
+ * NOT a `novo run` program: it targets a board and never ends.
+ *
+ * The part is a MAX98357A on a breakout (Adafruit 3006, SparkFun
+ * BOB-14809, Pimoroni, M5Stack): the board's I2S pins to BCLK, LRCLK and DIN,
+ * 5 V or 3.3 V to Vin, ground, a speaker of 4 to 8 ohms on the terminals,
+ * SD_MODE to the board's pin 28 and GAIN to pin 29.  The breakouts pull
+ * SD_MODE up through a resistor to the left channel, and the program
+ * drives it.  The pin 29 sets the gain, 9 dB with the pin left floating.
+ * The program prints one line, `playing` or `refused`.
+ *
+ * The program uses the amplifier as a sink for samples: `amp_start` puts
+ * the part in shutdown, configures and enables the I2S block at 16 kHz with
+ * 16-bit words, and raises SD_MODE last; `amp_tone` sends the sine; and
+ * `amp_stop_soft` sends a ramp to zero and then lowers SD_MODE before the
+ * clocks stop, as the data sheet asks.
+ *
+ * Effects the program declares: [hw], for the I2S block, the GPIO, the UART
+ * and the timer.  The driver allocates one cell at `attach`; the program
+ * allocates nothing after it starts.
+ *
+ * The I2S block: neither the nRF52840-DK's nor the nRF54LM20-DK's board
+ * package has an I2S block driver yet, and embedded-hal-nv has no board
+ * handle for one.  The program is therefore written against the `I2s` trait
+ * and is given `NoI2s`, a stand-in that refuses to be configured, so the
+ * program builds for both boards and prints "refused" at run time.  A board
+ * package that gives a handle implementing `I2s` replaces the one argument of
+ * `attach`.  No board on the bench carries the part; it has not been heard
+ * on a board.
+ */
+use embedded_hal.{ I2s, I2sConfig, BoardGpio }
+use max98357a
+use max98357a.{ AmpGain, AmpWiring }
+
+// The stand-in for a board's I2S block that is not there.
+@value
+struct NoI2s
+    id: Int
+
+impl I2s for NoI2s
+    fn configure(self, c: I2sConfig) -> Bool [hw]
+        false
+
+    fn sample_rate(self) -> Int [hw]
+        0
+
+    fn enable(self) -> Bool [hw]
+        false
+
+    fn disable(self) [hw]
+        pass
+
+    fn transmit(self, var buf: Vec[i32; 256]) -> Int [hw]
+        -1
+
+    fn receive(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        -1
+
+    fn xruns(self) -> Int [hw]
+        0
+
+@tier(embedded)
+fn main() [hw]
+    bsp.board.init()
+    let wiring = AmpWiring { sd_mode: 28, gain: Some(29), gain_via_100k: false }
+    let amp = max98357a.attach(NoI2s { id: 0 }, BoardGpio { id: 0 }, wiring, max98357a.config(16000))
+    let _ = amp.amp_set_gain(AmpGain.Gain9Db)
+    let settle_us = amp.amp_start()
+    if settle_us < 0
+        hal.uart.write("refused\n")
+    else
+        hal.uart.write("playing\n")
+        hal.timer.delay_ms(settle_us / 1000 + 1)
+    while true
+        let sent = amp.amp_tone(440, 500, 16384)
+        if sent > 0
+            let _ = amp.amp_stop_soft(0)
+        hal.timer.delay_ms(500)

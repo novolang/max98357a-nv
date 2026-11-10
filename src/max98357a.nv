@@ -1,0 +1,453 @@
+// max98357a — Maxim's (now Analog Devices') MAX98357A and MAX98357B, digital
+// PCM input class D audio power amplifiers, as a sink for the samples of a
+// board's `I2s` handle, with the two pins the part has: SD_MODE and GAIN_SLOT.
+//
+// The document is the data sheet "MAX98357A/MAX98357B PCM Input Class D Audio
+// Power Amplifiers", 19-6779; Rev 7; 2/16.  The part has no register and no
+// control bus.  What a program has to know is in the data sheet's tables:
+//
+//   - The frame.  The MAX98357A takes standard I2S data (the first bit one BCLK
+//     after the LRCLK edge, left word when LRCLK is low); the MAX98357B takes
+//     left-justified data (no delay, left word when LRCLK is high).  Data is
+//     clocked in on the rising edge of BCLK.  LRCLK accepts only 8, 16, 32, 44.1,
+//     48, 88.2 and 96 kHz (Electrical Characteristics, and § I2S and Left
+//     Justified Mode: 11.025, 12, 22.05 and 24 kHz are NOT supported).  BCLK
+//     must be 32, 48 or 64 times LRCLK, which for a two-channel frame is a word
+//     of 16, 24 or 32 bits.  There is no master clock.
+//   - SD_MODE (Table 5): low is shutdown (0.6 uA); high through nothing selects
+//     the left word; high through RSMALL selects the right word; high through RLARGE
+//     selects (left + right) / 2.  RSMALL = 94.0 x VDDIO - 100 and RLARGE =
+//     222.2 x VDDIO - 100, in kilo-ohms, VDDIO in volts (Table 6 gives 69.8 and
+//     300 at 1.8 V, 210.2 and 634 at 3.3 V).  The pin has a 100 kohm pull-down
+//     inside.  The comparator trip points are 0.16, 0.77 and 1.4 V typically.
+//   - GAIN_SLOT (Table 8): through 100 kohm to ground is 15 dB, to ground 12 dB,
+//     unconnected 9 dB, to VDD 6 dB, through 100 kohm to VDD 3 dB.
+//   - Timing: the turn-on time is 7.5 ms at most from SD_MODE (Electrical
+//     Characteristics), and the part goes to standby (340 uA, outputs high
+//     impedance) when BCLK stops.
+//
+// Pitfalls the data sheet names, and what is done here:
+//
+//   - "Do not remove LRCLK while BCLK is present": the output may show a large
+//     DC voltage.  `stop` drives SD_MODE low first, and only then stops the
+//     clocks.
+//   - "Ramp down the digital data on SDIN before powering down": the part has no
+//     volume ramp when it enters shutdown.  `stop_soft` sends a ramp to zero
+//     before it shuts the part down.
+//   - The part ramps its input from mute on start-up, and applying the clocks
+//     before or after SD_MODE gives the same click-and-pop.  `start` starts the
+//     clocks with SD_MODE low and raises SD_MODE last, so the part never sees
+//     half a frame.
+//   - SD_MODE driven straight to logic high on a rail above the part's supply
+//     violates the absolute maximum rating; the data sheet asks for ~2 kohm in
+//     series or VDD above VDDIO.  This is a board matter and the README says so.
+//
+// Drivers read for their fixes, nothing ported: the Linux kernel's
+// sound/soc/codecs/max98357a.c (GPL; read for the sequence and the lists only)
+// raises SD_MODE at the start of a stream and lowers it at the stop, accepts
+// the same seven rates and 16, 24 and 32-bit words, and has an optional delay
+// between the clocks and SD_MODE for boards where the start is audible; the
+// free functions below let a board put that wait between `sd_on` and the
+// handle's enable.  The Zephyr tree, Embassy, esp-hal and the Rust crates have
+// no driver for this part, which has no register.
+
+use embedded_hal.{ I2s, I2sConfig, I2sRole, I2sFormat, GpioOut }
+
+// The sample rates LRCLK accepts, in hertz.
+let RATE_8K = 8000
+let RATE_16K = 16000
+let RATE_32K = 32000
+let RATE_44K1 = 44100
+let RATE_48K = 48000
+let RATE_88K2 = 88200
+let RATE_96K = 96000
+
+// The turn-on time, at most, in microseconds (data sheet: 7.5 ms).
+pub const TURN_ON_US = 7500
+
+// The comparator trip points of SD_MODE in millivolts (typical, B0, B1, B2).
+let TRIP_B0_MV = 160
+let TRIP_B1_MV = 770
+let TRIP_B2_MV = 1400
+
+// The samples one buffer of `I2s` holds.
+pub const BUFFER_SAMPLES = 256
+
+// The frames in one buffer: a frame is a left and a right sample.
+pub const BUFFER_FRAMES = 128
+
+// The quarter wave of a sine, 65 points from 0 to 90 degrees in steps of
+// 90/64 degrees, scaled to 32767, and one more equal to the last so that an
+// interpolation at the top of the quarter has a neighbour.
+pub const SINE_QUARTER = [
+    0, 804, 1608, 2410, 3212, 4011, 4808, 5602, 6393, 7179, 7962,
+    8739, 9512, 10278, 11039, 11793, 12539, 13279, 14010, 14732, 15446, 16151,
+    16846, 17530, 18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594, 23170,
+    23731, 24279, 24811, 25329, 25832, 26319, 26790, 27245, 27683, 28105, 28510,
+    28898, 29268, 29621, 29956, 30273, 30571, 30852, 31113, 31356, 31580, 31785,
+    31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757, 32767, 32767
+]
+
+// The phase of a tone is a number of 2^24 steps to the cycle.
+pub const CYCLE = 16777216
+
+// Which part: the MAX98357A takes I2S data, the MAX98357B left-justified.
+pub @value
+enum AmpPart
+    Max98357A
+    Max98357B
+
+// The five gains of Table 8, in the order of the table's pin states.
+pub @value
+enum AmpGain
+    Gain3Db
+    Gain6Db
+    Gain9Db
+    Gain12Db
+    Gain15Db
+
+// The channel SD_MODE selects.
+pub @value
+enum AmpChannel
+    ChannelShutdown
+    ChannelMix
+    ChannelRight
+    ChannelLeft
+
+// What a program says about the stream: the part, the word clock in hertz and
+// the bits of a sample, 16, 24 or 32.  The frame is always two channels.
+pub @value
+struct AmpConfig
+    part: AmpPart
+    sample_rate: Int
+    bit_depth: Int
+
+// What a program says about the wiring: the pin that drives SD_MODE, the pin
+// that drives GAIN_SLOT (`None` when GAIN_SLOT is strapped on the board), and
+// whether the board puts 100 kohm between the gain pin and GAIN_SLOT, which
+// makes low 15 dB and high 3 dB instead of 12 dB and 6 dB.
+pub @value
+struct AmpWiring
+    sd_mode: Int
+    gain: ?Int
+    gain_via_100k: Bool
+
+// ── The stream ───────────────────────────────────────────────────────
+
+// A MAX98357A stream of 16-bit samples at `rate` hertz.
+pub fn config(rate: Int) -> AmpConfig
+    AmpConfig { part: AmpPart.Max98357A, sample_rate: rate, bit_depth: 16 }
+
+// Whether LRCLK accepts this word clock.
+pub fn rate_ok(rate: Int) -> Bool
+    rate == RATE_8K or rate == RATE_16K or rate == RATE_32K or rate == RATE_44K1 or rate == RATE_48K or rate == RATE_88K2 or rate == RATE_96K
+
+// Whether BCLK is 32, 48 or 64 times LRCLK for a two-channel frame of this
+// word: the words of 16, 24 and 32 bits.
+pub fn bclk_ratio_ok(bit_depth: Int) -> Bool
+    bit_depth == 16 or bit_depth == 24 or bit_depth == 32
+
+// Whether the part takes the stream.
+pub fn config_ok(c: AmpConfig) -> Bool
+    rate_ok(c.sample_rate) and bclk_ratio_ok(c.bit_depth)
+
+// The bit clock in hertz: the word clock times 2 channels times the word.
+pub fn bclk_hz(c: AmpConfig) -> Int
+    c.sample_rate * 2 * c.bit_depth
+
+// The settings the I2S handle gets: the chip is the master, two channels, and
+// the framing of the part.
+pub fn i2s_config_of(c: AmpConfig) -> I2sConfig
+    var framing = I2sFormat.I2sPhilips
+    if c.part == AmpPart.Max98357B
+        framing = I2sFormat.I2sLeftJustified
+    I2sConfig { sample_rate: c.sample_rate, bit_depth: c.bit_depth, channels: 2,
+                role: I2sRole.I2sMaster, format: framing }
+
+// ── SD_MODE ──────────────────────────────────────────────────────────
+
+// RSMALL in tenths of a kilo-ohm for a logic level of `vddio_mv` millivolts:
+// 94.0 x VDDIO - 100 kohm.  -1 when the level is too low for the part to be
+// driven through a resistor (the value would not be positive).
+pub fn rsmall_tenth_kohm(vddio_mv: Int) -> Int
+    let r = 94 * vddio_mv / 100 - 1000
+    if r <= 0
+        return -1
+    r
+
+// RLARGE in tenths of a kilo-ohm: 222.2 x VDDIO - 100 kohm; -1 as above.
+pub fn rlarge_tenth_kohm(vddio_mv: Int) -> Int
+    let r = 2222 * vddio_mv / 1000 - 1000
+    if r <= 0
+        return -1
+    r
+
+// The channel the voltage on SD_MODE selects (Table 5), by the typical trip
+// points: above 1.4 V left, from 0.77 to 1.4 V right, from 0.16 to 0.77 V the
+// mix of both, below 0.16 V shutdown.
+pub fn channel_of_mv(mv: Int) -> AmpChannel
+    if mv > TRIP_B2_MV
+        return AmpChannel.ChannelLeft
+    if mv > TRIP_B1_MV
+        return AmpChannel.ChannelRight
+    if mv > TRIP_B0_MV
+        return AmpChannel.ChannelMix
+    AmpChannel.ChannelShutdown
+
+// Raises SD_MODE: the pin is made an output and driven high, which turns the
+// part on in the channel the board's resistor selects.
+pub fn sd_on<G: GpioOut>(gpio: G, w: AmpWiring) [hw]
+    gpio.mode(w.sd_mode, 1)
+    gpio.set(w.sd_mode, 1)
+
+// Lowers SD_MODE: the part is in shutdown.
+pub fn sd_off<G: GpioOut>(gpio: G, w: AmpWiring) [hw]
+    gpio.mode(w.sd_mode, 1)
+    gpio.set(w.sd_mode, 0)
+
+// ── GAIN_SLOT ────────────────────────────────────────────────────────
+
+// The gain in decibels.
+pub fn gain_db(g: AmpGain) -> Int
+    match g
+        Gain3Db => 3
+        Gain6Db => 6
+        Gain9Db => 9
+        Gain12Db => 12
+        Gain15Db => 15
+
+// What the gain pin does for a gain: 0 driven low, 1 driven high, 2 left
+// floating (an input), -1 when the wiring cannot make it.  Without the 100 kohm
+// the pin can make 12 dB (low), 6 dB (high) and 9 dB (floating); with it,
+// 15 dB (low), 3 dB (high) and 9 dB.
+pub fn gain_drive(g: AmpGain, via_100k: Bool) -> Int
+    match g
+        Gain9Db => 2
+        Gain12Db =>
+            if via_100k
+                return -1
+            0
+        Gain6Db =>
+            if via_100k
+                return -1
+            1
+        Gain15Db =>
+            if via_100k
+                return 0
+            -1
+        Gain3Db =>
+            if via_100k
+                return 1
+            -1
+
+// Sets the gain by the gain pin.  Answers false when the wiring has no gain
+// pin or cannot make that gain; nothing is driven then.
+pub fn gain_set<G: GpioOut>(gpio: G, w: AmpWiring, g: AmpGain) -> Bool [hw]
+    let Some(pin) = w.gain else return false
+    let d = gain_drive(g, w.gain_via_100k)
+    if d < 0
+        return false
+    if d == 2
+        gpio.mode(pin, 0)
+        return true
+    gpio.mode(pin, 1)
+    gpio.set(pin, d)
+    true
+
+// ── Starting and stopping ────────────────────────────────────────────
+
+// Starts the stream: the part is kept in shutdown while the I2S handle is
+// configured and its clocks start, then SD_MODE is raised.  Answers the
+// microseconds until the output is on (the turn-on time), or -1 when the
+// settings are not ones the part takes or the handle refused them; SD_MODE is
+// low on every refusal.
+pub fn start<S: I2s, G: GpioOut>(i2s: S, gpio: G, w: AmpWiring, c: AmpConfig) -> Int [hw]
+    sd_off(gpio, w)
+    if not config_ok(c)
+        return -1
+    if not i2s.configure(i2s_config_of(c))
+        return -1
+    if not i2s.enable()
+        return -1
+    sd_on(gpio, w)
+    TURN_ON_US
+
+// Stops the stream: SD_MODE goes low first, so the part is off before the clocks
+// stop.
+pub fn stop<S: I2s, G: GpioOut>(i2s: S, gpio: G, w: AmpWiring) [hw]
+    sd_off(gpio, w)
+    i2s.disable()
+
+// Fills `buf` with `n` samples that fall in a straight line from `last`, the
+// last sample sent, to zero, the first one a step from `last`; the samples are
+// the same on both channels of a frame.  `n` is rounded down to whole frames
+// and `buf` is emptied first.
+pub fn ramp_fill(var buf: Vec[i32; 256], last: Int, n: Int)
+    buf.clear()
+    var frames = n / 2
+    if frames > BUFFER_FRAMES
+        frames = BUFFER_FRAMES
+    var mag = last
+    var neg = false
+    if last < 0
+        mag = 0 - last
+        neg = true
+    for k in 0..frames
+        let v = mag * (frames - 1 - k) / frames
+        var s = v
+        if neg
+            s = 0 - v
+        let _ = buf.push(s as i32)
+        let _ = buf.push(s as i32)
+
+// Stops the stream with a ramp to zero: one buffer that falls from `last`, the
+// last sample sent, to zero, then `stop`.  The ramp is sent to the I2S handle
+// before SD_MODE goes low, because the part has no ramp of its own on shutdown.
+// Answers whether the ramp was sent; the part is stopped either way.
+pub fn stop_soft<S: I2s, G: GpioOut>(i2s: S, gpio: G, w: AmpWiring, last: Int) -> Bool [hw]
+    var buf: Vec[i32; 256] = Vec.new()
+    ramp_fill(var buf, last, BUFFER_SAMPLES)
+    let sent = i2s.transmit(var buf)
+    stop(i2s, gpio, w)
+    sent == BUFFER_SAMPLES
+
+// Sends the samples of `buf` (stereo, left first): the number sent, or -1 when
+// the handle refused.
+pub fn write<S: I2s>(i2s: S, var buf: Vec[i32; 256]) -> Int [hw]
+    i2s.transmit(var buf)
+
+// ── The tone ─────────────────────────────────────────────────────────
+
+// The sine of a phase, in 1/32767: the phase is 24 bits to the cycle.  The
+// quarter wave is looked up with a linear interpolation between its points and
+// mirrored into the four quadrants.
+pub fn sine_q15(phase: Int) -> Int
+    let ph = phase & (CYCLE - 1)
+    let quadrant = (ph >> 22) & 3
+    var x = ((ph >> 16) & 63) * 256 + ((ph >> 8) & 255)
+    if (quadrant & 1) == 1
+        x = 16384 - x
+    let i = x >> 8
+    let f = x & 255
+    let v = SINE_QUARTER[i] + (SINE_QUARTER[i + 1] - SINE_QUARTER[i]) * f / 256
+    if quadrant >= 2
+        return 0 - v
+    v
+
+// The phase step of a tone of `freq` hertz at `rate` hertz: the cycle over the
+// samples to the cycle.  0 for a rate that is not positive.
+pub fn tone_step(freq: Int, rate: Int) -> Int
+    if rate <= 0
+        return 0
+    freq * CYCLE / rate
+
+// The sample of a tone at `phase` for an amplitude `amp`, 0 to 32767 (full
+// scale), in a word of `bit_depth` bits: the sine scaled by the amplitude and
+// moved up to the top of the word.  The sign is applied after the scaling, so
+// a negative half wave is the mirror of the positive one.
+pub fn tone_sample(phase: Int, amp: Int, bit_depth: Int) -> Int
+    let s = sine_q15(phase)
+    var mag = s
+    var neg = false
+    if s < 0
+        mag = 0 - s
+        neg = true
+    var v = (mag * amp) >> 15
+    if bit_depth == 24
+        v = v << 8
+    if bit_depth == 32
+        v = v << 16
+    if neg
+        return 0 - v
+    v
+
+// Fills `buf` with 128 stereo frames of a tone from `phase`, the same sample
+// on both channels, and answers the phase after them.  `buf` is emptied first.
+pub fn tone_fill(var buf: Vec[i32; 256], phase: Int, step: Int, amp: Int, bit_depth: Int) -> Int
+    buf.clear()
+    var ph = phase
+    for _k in 0..BUFFER_FRAMES
+        let s = tone_sample(ph, amp, bit_depth) as i32
+        let _ = buf.push(s)
+        let _ = buf.push(s)
+        ph = (ph + step) & (CYCLE - 1)
+    ph
+
+// The number of buffers that hold `ms` milliseconds at `rate` hertz, rounded up.
+pub fn tone_buffers(ms: Int, rate: Int) -> Int
+    if ms <= 0
+        return 0
+    let frames = ms * rate / 1000
+    (frames + BUFFER_FRAMES - 1) / BUFFER_FRAMES
+
+// Plays a tone of `freq` hertz for about `ms` milliseconds: whole buffers
+// from `tone_fill`, the phase carried from one to the next.  Answers the
+// samples sent, or -1 as soon as the handle refuses a buffer.
+pub fn play_tone<S: I2s>(i2s: S, c: AmpConfig, freq: Int, ms: Int, amp: Int) -> Int [hw]
+    let step = tone_step(freq, c.sample_rate)
+    let n = tone_buffers(ms, c.sample_rate)
+    var phase = 0
+    var sent = 0
+    var buf: Vec[i32; 256] = Vec.new()
+    for _k in 0..n
+        phase = tone_fill(var buf, phase, step, amp, c.bit_depth)
+        let r = i2s.transmit(var buf)
+        if r != BUFFER_SAMPLES
+            return -1
+        sent = sent + r
+    sent
+
+// ── The amplifier on a board's I2S handle ────────────────────────────
+
+// An amplifier on the board's `I2s` handle and GPIO.  `start` configures and
+// enables the handle and raises SD_MODE; `stop` lowers it and disables the
+// handle.  A struct with generic fields cannot be a `@value`, so the amplifier
+// is one cell of the arena, built in a `system` block, the one allocation of
+// the package; it is released when the last reference to it goes.
+pub struct Max98357a<S: I2s, G: GpioOut>
+    i2s: S
+    gpio: G
+    w: AmpWiring
+    cfg: AmpConfig
+
+// The amplifier configured by `cfg` on `i2s` and `gpio`.  Nothing is driven.
+pub fn attach<S: I2s, G: GpioOut>(i2s: S, gpio: G, w: AmpWiring, cfg: AmpConfig) -> Max98357a<S, G>
+    system
+        return Max98357a { i2s: i2s, gpio: gpio, w: w, cfg: cfg }
+
+impl Max98357a
+    // The configuration.
+    fn config(self) -> AmpConfig
+        self.cfg
+
+    // The wiring.
+    fn wiring(self) -> AmpWiring
+        self.w
+
+    // Starts the stream (`start`): the microseconds until the output is on, or -1.
+    fn amp_start(self) -> Int [hw]
+        start(self.i2s, self.gpio, self.w, self.cfg)
+
+    // Stops the stream (`stop`).
+    fn amp_stop(self) [hw]
+        stop(self.i2s, self.gpio, self.w)
+
+    // Stops the stream after a ramp from `last` to zero (`stop_soft`).
+    fn amp_stop_soft(self, last: Int) -> Bool [hw]
+        stop_soft(self.i2s, self.gpio, self.w, last)
+
+    // Sends the samples of `buf`.
+    fn amp_write(self, var buf: Vec[i32; 256]) -> Int [hw]
+        write(self.i2s, var buf)
+
+    // Plays a tone for about `ms` milliseconds at amplitude `amp`.
+    fn amp_tone(self, freq: Int, ms: Int, amp: Int) -> Int [hw]
+        play_tone(self.i2s, self.cfg, freq, ms, amp)
+
+    // Sets the gain by the gain pin.
+    fn amp_set_gain(self, g: AmpGain) -> Bool [hw]
+        gain_set(self.gpio, self.w, g)
+
+    // The buffers the I2S handle has lost since it was enabled.
+    fn amp_lost(self) -> Int [hw]
+        self.i2s.xruns()
