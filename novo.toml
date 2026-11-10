@@ -26,7 +26,7 @@ tier = "embedded"
 
 [dependencies]
 # The I2s and GpioOut traits and the I2S settings the handle is configured
-# with.  A path, because I2s is in the 0.3.3 release and the registry lists
-# 0.3.2.  The package needs no other dependency: the part has no register, so
-# there is no devices-nv trait to implement.
-embedded-hal-nv = { path = "../embedded-hal-nv" }
+# with, from the 0.3.3 release, which has the I2s trait.  The package needs no
+# other dependency: the part has no register, so there is no devices-nv trait
+# to implement.
+embedded-hal-nv = "^0.3.3"

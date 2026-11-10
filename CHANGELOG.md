@@ -35,8 +35,8 @@ pins.
   prints `refused`.
 - Not implemented: TDM mode, a volume or mute (the part has none), the channel
   select by software (it is a resistor), mono frames and the async sink.
-- `embedded-hal-nv` is a path dependency (`../embedded-hal-nv`, 0.3.3), which
-  has the `I2s` trait and is not on the registry yet. The package needs no
-  `devices-nv`: the part has no register for a trait to set.
+- `embedded-hal-nv` is the registry range `^0.3.3`, the first release with the
+  `I2s` trait. The package needs no `devices-nv`: the part has no register for
+  a trait to set.
 - The `[tier]` of the manifest is `embedded`, the strictest, so the module also
   checks at `rt` and `system`.

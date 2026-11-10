@@ -10,9 +10,7 @@
 # (nrf52-qemu) is then run under QEMU, where the program has no I2S block to
 # drive, and its first line must be the program's refusal.
 #
-# While embedded-hal-nv 0.3.3 is not on the registry, this package's
-# manifest names it by path, and the scratch package does the same.  The
-# package needs no devices-nv: the part has no register.
+# The package needs no devices-nv: the part has no register.
 # Run from anywhere:  bash tests/device_build.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,12 +19,6 @@ NOVO="${NOVO:-$HOME/.novo/bin/novo}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/max98357a-nv-dev.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-
-if grep -q '^embedded-hal-nv *= *{ *path' "$PKG/novo.toml"; then
-  DEPS="embedded-hal-nv = { path = \"$PKG/../embedded-hal-nv\" }"
-else
-  DEPS='embedded-hal-nv = "^0.3.3"'
-fi
 
 mkdir -p "$WORK/src"
 cp "$PKG/examples/tone.nv" "$WORK/src/main.nv"
@@ -38,7 +30,7 @@ main    = "src/main.nv"
 
 [dependencies]
 max98357a-nv = { path = "$PKG" }
-$DEPS
+embedded-hal-nv = "^0.3.3"
 EOF
 
 fail=0
