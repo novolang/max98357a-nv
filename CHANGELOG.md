@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 — 2026-11-23
+
+The package asks for embedded-hal-nv ^0.4.0 (was ^0.3.3), the minor of both trait packages that the other drivers and the board packages ask for, so one version of each serves a program that takes this package beside any of them.  Under the older ranges, a program that named this package and a driver on 0.4 stopped with "no version of 'embedded-hal-nv' satisfies every requirement".
+
+No signature of the package changed.  `i2s_config_of` gives the board's `I2sConfig` the `slot_bits` that embedded-hal-nv 0.4.0 adds, 0, a slot as wide as the sample.
+
+The device program builds for the boards its README names, flash nrf52840-dk 9,208 B before and 9,148 B after; nrf54lm20-dk 10,544 B before and 10,484 B after; nrf52-qemu 9,036 B before and 8,976 B after.
+
 ## 0.1.0
 
 The first release: a driver for the MAX98357A and MAX98357B I2S class D audio

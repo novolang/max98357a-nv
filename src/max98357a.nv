@@ -154,14 +154,14 @@ pub fn config_ok(c: AmpConfig) -> Bool
 pub fn bclk_hz(c: AmpConfig) -> Int
     c.sample_rate * 2 * c.bit_depth
 
-// The settings the I2S handle gets: the chip is the master, two channels, and
-// the framing of the part.
+// The settings the I2S handle gets: the chip is the master, two channels, the
+// framing of the part and a slot as wide as the sample.
 pub fn i2s_config_of(c: AmpConfig) -> I2sConfig
     var framing = I2sFormat.I2sPhilips
     if c.part == AmpPart.Max98357B
         framing = I2sFormat.I2sLeftJustified
     I2sConfig { sample_rate: c.sample_rate, bit_depth: c.bit_depth, channels: 2,
-                role: I2sRole.I2sMaster, format: framing }
+                role: I2sRole.I2sMaster, format: framing, slot_bits: 0 }
 
 // ── SD_MODE ──────────────────────────────────────────────────────────
 

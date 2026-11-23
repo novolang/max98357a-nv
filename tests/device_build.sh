@@ -30,7 +30,7 @@ main    = "src/main.nv"
 
 [dependencies]
 max98357a-nv = { path = "$PKG" }
-embedded-hal-nv = "^0.3.3"
+embedded-hal-nv = "^0.4.0"
 EOF
 
 fail=0

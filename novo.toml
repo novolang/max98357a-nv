@@ -1,6 +1,6 @@
 [package]
 name        = "max98357a-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "A driver for the MAX98357A and MAX98357B, I2S class D audio amplifiers with no registers, over a board's I2S handle and two GPIO pins: SD_MODE for turn-on and shutdown in the order the data sheet asks, the gain pin with its five gains, the stream the part accepts (seven word clocks, 16, 24 or 32-bit words, I2S or left-justified), a quarter-wave sine table for a tone, and a ramp to zero before shutdown."
 license     = "Apache-2.0"
 stability   = "experimental"
@@ -26,7 +26,7 @@ tier = "embedded"
 
 [dependencies]
 # The I2s and GpioOut traits and the I2S settings the handle is configured
-# with, from the 0.3.3 release, which has the I2s trait.  The package needs no
+# with; the I2s trait is in 0.3.3 and later.  The package needs no
 # other dependency: the part has no register, so there is no devices-nv trait
 # to implement.
-embedded-hal-nv = "^0.3.3"
+embedded-hal-nv = "^0.4.0"

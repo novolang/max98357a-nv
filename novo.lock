@@ -3,6 +3,6 @@
 [embedded-hal-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.3.3"
-version = "0.3.3"
-hash = "fbb7f249ee60f97975a8221c5019aa33c193612e3d1638982ec51c0ce0f2ee2d"
+req = "^0.4.0"
+version = "0.4.0"
+hash = "5a3f44dfab95b22e63fd4fa27eba722d5f1930e44792ee27eaf10b2f703fdb42"

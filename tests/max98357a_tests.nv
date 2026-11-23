@@ -171,6 +171,8 @@ fn test_the_handle_is_configured_as_master_with_two_channels() [io, hw]
     test.assert_eq(a.channels, 2)
     test.assert(a.role == I2sRole.I2sMaster)
     test.assert(a.format == I2sFormat.I2sPhilips)
+    // A slot as wide as the sample.
+    test.assert_eq(a.slot_bits, 0)
     let b = max98357a.i2s_config_of(AmpConfig { part: AmpPart.Max98357B, sample_rate: 96000, bit_depth: 32 })
     test.assert(b.format == I2sFormat.I2sLeftJustified)
     test.assert_eq(b.bit_depth, 32)
