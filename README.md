@@ -76,7 +76,7 @@ fn main() [hw]
     bsp.board.init()
     let wiring = AmpWiring { sd_mode: 28, gain: Some(29), gain_via_100k: false }
     let amp = max98357a.attach(NoI2s { id: 0 }, BoardGpio { id: 0 }, wiring, max98357a.config(16000))
-    let _ = amp.amp_set_gain(AmpGain.Gain9Db)
+    amp.amp_set_gain(AmpGain.Gain9Db)
     let settle_us = amp.amp_start()
     if settle_us < 0
         hal.uart.write("refused\n")
@@ -86,7 +86,7 @@ fn main() [hw]
     while true
         let sent = amp.amp_tone(440, 500, 16384)
         if sent > 0
-            let _ = amp.amp_stop_soft(0)
+            amp.amp_stop_soft(0)
         hal.timer.delay_ms(500)
 ```
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 — 2026-11-27
+
+The README example and `examples/tone.nv` call `amp.amp_set_gain` and `amp.amp_stop_soft` without a binding.  No signature of the package changed.
+
 ## 0.1.1 — 2026-11-23
 
 The package asks for embedded-hal-nv ^0.4.0 (was ^0.3.3), the minor of both trait packages that the other drivers and the board packages ask for, so one version of each serves a program that takes this package beside any of them.  Under the older ranges, a program that named this package and a driver on 0.4 stopped with "no version of 'embedded-hal-nv' satisfies every requirement".
